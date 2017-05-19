@@ -1,0 +1,680 @@
+package com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility
+
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Properties
+import scala.collection.mutable.ArrayBuffer
+import org.apache.hadoop.mapred.InvalidInputException
+import org.apache.spark.SparkContext
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.types.DateType
+import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.types.LongType
+import org.apache.spark.sql.types.StringType
+import org.apache.spark.sql.types.StructField
+import org.apache.spark.sql.types.StructType
+import org.joda.time.LocalDate
+import org.springframework.context.support.ClassPathXmlApplicationContext
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIConfig
+import com.ms.banking.pricing.common.utils.TimeUtils.getMonth
+import com.ms.banking.pricing.common.utils.TimeUtils.getQuarter
+import com.ms.banking.pricing.common.utils.TimeUtils.getYear
+import com.ms.banking.pricing.common.utils.format.DFormatter
+import java.util.Calendar
+
+/**
+ * @author Venreddy
+ */
+
+class CCARUtils extends Serializable {
+  val sdf = new SimpleDateFormat("yyyyMMdd")
+  val sdf2 = new SimpleDateFormat("MM/dd/yyyy")
+  val sdf3 = new SimpleDateFormat("yyyy-MM-dd")
+  val df_MMddyy = new SimpleDateFormat("MM/dd/yyyy");
+ val SAS_INTERPOLATION_START = sdf3.parse("1960-01-01")
+ 
+  @transient lazy val context: ClassPathXmlApplicationContext = new ClassPathXmlApplicationContext("Bean.xml")
+  def getSparkContext(): SparkContext = {
+    val sc = context.getBean("sparkContext").asInstanceOf[SparkContext];
+    return sc
+  }
+
+  def getProperties(): Properties = {
+    val prop = context.getBean("config").asInstanceOf[Properties];
+    return prop
+  }
+
+  def monthEndDate(date: String): String = {
+    if (date.length() == 7) {
+      var year = date.substring(0, 4).toInt
+      var month = date.substring(5, 7).toInt
+      if (month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12) { return date + "31" }
+      else if (month != 2)
+        return date + "30"
+      else if (year % 4 == 0)
+        return date + "29"
+      else
+        return date + "28"
+    } else
+      return date.substring(0, 4) + "" + date.substring(4, 6) + "" + date.substring(6, 8)
+
+  }
+  def monthEndDate2(date: String): String = {
+    var year = date.substring(0, 4).toInt
+    var month1 = date.substring(4, 6)
+    var month = month1.toInt
+    var day = ""
+    if (date.length() == 8) {
+
+      if (month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12) { day = "31" }
+      else if (month != 2)
+        day = "30"
+      else if (year % 4 == 0)
+        day = "29"
+      else
+        day = "28"
+    } else
+      date
+
+    return year + month1 + day
+
+  }
+
+  def quarterEndDate(date: String): String = {
+    val dArr = date.split("/")
+
+    var year = dArr(2).toInt
+    var month = dArr(0).toInt
+    var day = ""
+    if (month == 1 || month == 2 || month == 3) month = 3
+    if (month == 4 || month == 5 || month == 6) month = 6
+    if (month == 7 || month == 8 || month == 9) month = 9
+    if (month == 10 || month == 11 || month == 12) month = 12
+
+    if (month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12) { day = "31" }
+    else if (month != 2)
+      day = "30"
+    else if (year % 4 == 0)
+      day = "29"
+    else
+      day = "28"
+    return year + "%02d".format(month) + day
+  }
+
+  // for Step-2 deviding date with '-' 
+  def monthEndDate1(date: String): String = {
+    return date.substring(0, 4) + "-" + date.substring(4, 6) + "-" + date.substring(6, 8)
+  }
+  // Step-4 Developing...
+  def monthChangeFormate(date: String): String = {
+    return date.substring(0, 4) + "/" + date.substring(4, 6) + "/" + date.substring(6, 8)
+  }
+  def changeFormat(date: String): String = {
+
+    val s = sdf.format(sdf2.parse(date))
+    return monthEndDate2(s)
+  }
+
+  def convertRDD2Row(armFwdRisk1: RDD[String]): RDD[Row] = {
+    val armFwdRisk1_RDD = armFwdRisk1.flatMap(_.split("\n")).map(x => x.split(",")).map(p => Row(p(0), p(1), p(2), monthEndDate(p(3)), monthEndDate(p(4)), getDouble(p(5)), getDouble(p(6)),
+      getDouble(p(7)), getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)), getDouble(p(12)), getDouble(p(13)), getDouble(p(14)), getDouble(p(15))))
+    return armFwdRisk1_RDD
+  }
+
+  def convertRDD2Row2(armPrepay: RDD[String]): RDD[Row] = {
+    val armPrepayRowRDD = armPrepay.map(_.split(",")).map(p => Row(p(0), p(1), p(2), monthEndDate(p(3)), monthEndDate(p(4)), p(5).toDouble, p(6).toDouble, p(7).toDouble,
+      p(8).toDouble))
+    return armPrepayRowRDD
+  }
+
+  // for step3
+  def convertRDD2Row3(step2_Input: RDD[String]): RDD[Row] = {
+    val step2_RDD = step2_Input.flatMap(_.split("\n")).map(x => x.split(",")).map(p => Row(p(0), monthEndDate1(p(1)), monthEndDate1(p(2)), p(3), getDouble(p(4)), getDouble(p(5)), getDouble(p(6)),
+      getDouble(p(7)), getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)), getDouble(p(12))))
+
+    return step2_RDD
+
+  }
+  //  Aggregating step-2 from Step-1 result 
+  def convertRDD2Row4(main2java: RDD[String]): RDD[Row] = {
+
+    val main2JavaRDD = main2java.map(x => x.split(",", -1)).filter(x => x.length == 15).filter(p => (!(p(3).substring(0, 4).toInt > 2018))).map(p => Row(p(0), p(1), p(2), p(3), p(4), p(5), getDouble(p(6)), getDouble(p(7)),
+      getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)), getDouble(p(12)), getDouble(p(13)), getDouble(p(14))))
+
+    return main2JavaRDD
+
+  }
+
+  // FCG Script Step
+  def convertRDD2Row5(adverse_Case: RDD[String]): RDD[Row] = {
+    val adverse_Case_RowRDD = adverse_Case.map(_.split(",")).map(p => Row(p(0), p(1), p(2), p(3), getDouble(p(4))))
+
+    return adverse_Case_RowRDD
+  }
+
+  // For incoming new file{not used}
+  def convertRDD2Row6(main2java: RDD[String]): RDD[Row] = {
+
+    val main2JavaRDD = main2java.map(x => x.split(",", -1)).filter(x => x.length == 15).filter(p => (!(p(3).substring(0, 4).toInt > 2018))).map(p => Row(p(0), p(1), p(2), p(3), p(4), p(5), getDouble(p(6)), getDouble(p(7)),
+      getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)), getDouble(p(12)), getDouble(p(13)), getDouble(p(14))))
+
+    return main2JavaRDD
+  }
+
+  def createStructSchema(schema: String): StructType = {
+    return StructType(
+      schema.split(" ").map(fieldName => if (fieldName.split(":")(1) == "String") StructField(fieldName.split(":")(0), StringType, true)
+      else if (fieldName.split(":")(1) == "date") StructField(fieldName.split(":")(0), DateType, true)
+      else StructField(fieldName.split(":")(0), DoubleType, true)))
+  }
+
+  def getDouble(st: String): Any = {
+    if ("null".equalsIgnoreCase(st) || st.isEmpty()) {
+      None
+    } else {
+      st.toDouble
+    }
+  }
+
+  def load_data(sc: SparkContext, path: String): RDD[String] = {
+    var rdd: RDD[String] = null;
+    try {
+      rdd = sc.textFile(path).mapPartitionsWithIndex { (idx, iter) => if (idx == 0) iter.drop(1) else iter }
+    } catch {
+      case ex: InvalidInputException => {
+        println("Input data not avaialble at " + path)
+      }
+    }
+    rdd
+  }
+
+  def getDate(x: Any): java.sql.Date = {
+
+    if (x.toString() == "")
+      return null
+    else {
+      var d: Date = null
+      try {
+        val format = new SimpleDateFormat("MM/dd/yyyy'")
+        d = format.parse(x.toString());
+      } catch {
+        case t: Exception => throw new Exception("Invalid date format") // TODO: handle error
+      }
+      return new java.sql.Date(d.getTime)
+    }
+  }
+
+  def load_data2(sc: SQLContext, path: String, schema: String): DataFrame = {
+    sc.read
+      .format("org.apache.spark.sql.execution.datasources.csv.CSVFileFormat")
+      .option("header", "true")
+      .option("delimiter", ";")
+      .option("dateFormat", "MM/dd/yyyy")
+      .schema(createStructSchema(schema))
+      .load(path)
+  }
+
+  def create_df(sqlContext: SQLContext, armFwdRisk1: RDD[String], armFwdRisk_1Schema: StructType): DataFrame = {
+    var armFwdRisk1_RDD = convertRDD2Row(armFwdRisk1)
+    val armFwdRisk1_DataFrame = sqlContext.createDataFrame(armFwdRisk1_RDD, armFwdRisk_1Schema)
+    return armFwdRisk1_DataFrame;
+  }
+
+  def getLastDayOfQuarter(dtPortfolio: Date): Date = {
+    var lastDayOfQuarter: LocalDate = null
+    if (getMonth(dtPortfolio) > 8) {
+      lastDayOfQuarter = new LocalDate(getYear(dtPortfolio), 12, 31)
+    } else {
+      lastDayOfQuarter = new LocalDate(getYear(dtPortfolio), 3 * getQuarter(getMonth(dtPortfolio)) + 1, 1).plusDays(-1);
+    }
+    return lastDayOfQuarter.toDate();
+  }
+
+  def getFutureQuarters(portfolioStartDate: Date, forecastEndDate: Date, includeFirstQuarterEnd: Boolean): ArrayBuffer[Date] = {
+    val futureQuaters = new ArrayBuffer[Date]();
+    val nearestQuarterEnd = getLastDayOfQuarter(portfolioStartDate);
+    if (!portfolioStartDate.equals(nearestQuarterEnd) || includeFirstQuarterEnd) {
+      futureQuaters += (nearestQuarterEnd)
+    }
+    var nextQuaterEnd = new LocalDate(getYear(nearestQuarterEnd), getMonth(nearestQuarterEnd) + 1, 1).plusMonths(3).dayOfMonth().withMaximumValue().toDate();
+    while (!nextQuaterEnd.after(forecastEndDate)) {
+      futureQuaters += nextQuaterEnd
+      nextQuaterEnd = new LocalDate(getYear(nextQuaterEnd), getMonth(nextQuaterEnd) + 1, 1).plusMonths(3).dayOfMonth().withMaximumValue().toDate();
+    }
+    return futureQuaters;
+  }
+
+  def dateListAsString(dateList: ArrayBuffer[Date]): ArrayBuffer[String] = {
+    var list = new ArrayBuffer[String]
+
+    dateList.foreach { x => list += sdf.format(x) }
+    return list
+  }
+
+
+  def createRow(row: Row, p: String, v: String): Row = {
+    Row(row.get(0), row.get(1), row.get(2), v, p, row.get(5), row.get(6), row.get(7), row.get(8), row.get(9),
+      row.get(10), row.get(11), row.get(12), row.get(13), row.get(14))
+  }
+
+  def updateRow(row: Row, bmap: Broadcast[Map[String, String]]): Row = {
+    val prod3Str = bmap.value.get(row.getString(14))
+    val scenstr = bmap.value.get(row.getString(0))
+    val scenorio = row.getString(0).substring(4)
+    Row(scenorio, row.get(1), row.get(2), row.getString(3).replaceAll("-", ""), row.get(4), row.get(5), row.get(6), row.get(7), row.get(8), row.get(9),
+      row.get(10), row.get(11), row.get(12), row.get(13), prod3Str)
+  }
+  //
+  def addDropCol(row: Row): Row = {
+    Row(row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), getDouble(""), getDouble(""), getDouble(""), getDouble(""), getDouble(""),
+      getDouble(""), getDouble(""), getDouble(""), getDouble(""), getDouble(""), getDouble(""))
+  }
+
+  def dfZipWithIndex(
+    df: DataFrame,
+    offset: Int = 1,
+    colName: String = "id",
+    inFront: Boolean = true): DataFrame = {
+    df.sqlContext.createDataFrame(
+      df.rdd.zipWithIndex.map(ln =>
+        Row.fromSeq(
+          if (ln._1.getString(3).equals("20151231")) {
+            ln._1.toSeq ++ Seq(0L)
+          } else if (ln._1.getString(3).equals("20160331")) {
+            ln._1.toSeq ++ Seq(1L)
+          } else if (ln._1.getString(3).equals("20160630")) {
+            ln._1.toSeq ++ Seq(2L)
+          } else if (ln._1.getString(3).equals("20160930")) {
+            ln._1.toSeq ++ Seq(3L)
+          } else if (ln._1.getString(3).equals("20161231")) {
+            ln._1.toSeq ++ Seq(4L)
+          } else if (ln._1.getString(3).equals("20170331")) {
+            ln._1.toSeq ++ Seq(5L)
+          } else if (ln._1.getString(3).equals("20170630")) {
+            ln._1.toSeq ++ Seq(6L)
+          } else if (ln._1.getString(3).equals("20170930")) {
+            ln._1.toSeq ++ Seq(7L)
+          } else if (ln._1.getString(3).equals("20171231")) {
+            ln._1.toSeq ++ Seq(8L)
+          } else if (ln._1.getString(3).equals("20180331")) {
+            ln._1.toSeq ++ Seq(9L)
+          } else if (ln._1.getString(3).equals("20180630")) {
+            ln._1.toSeq ++ Seq(10L)
+          } else if (ln._1.getString(3).equals("20180930")) {
+            ln._1.toSeq ++ Seq(11L)
+          } else {
+            ln._1.toSeq ++ Seq(12L)
+          })),
+      StructType(
+        (if (inFront) Array(StructField(colName, LongType, false)) else Array[StructField]())
+          ++ df.schema.fields ++
+          (if (inFront) Array[StructField]() else Array(StructField(colName, LongType, false)))))
+  }
+  def getProductScenarioMap(): Map[String, String] = {
+    val map = Map("adverse" -> "Adv", "base" -> "Bas", "severe" -> "Sev", "30Yr Fixed" -> "Fx_30y", "15Yr Fixed" -> "Fx_15y", "IO10" -> "Ft_10y", "IO10 PI" -> "Ft_10y", "IO7" -> "Ft_07y", "IO7 PI" -> "Ft_07y", "IO5" -> "Ft_05y", "IO5 PI" -> "Ft_05y", "IO3" -> "Ft_03y", "IO3 PI" -> "Ft_03y", "1mo" -> "Ft_01m", "Heloc" -> "Ft_hel")
+    map
+
+  }
+  }
+========================
+package com.ms.banking.pbg_analytics_spark.nii.process
+
+import java.util.Properties
+
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.SQLContext
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.constants.CCARConstants
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility.Utils
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIConfig
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIRegression
+
+/**
+ * class to retrieve pricer rate from csv file
+ * @author venreddy
+ */
+class NIIPricerRateRetriever extends Serializable {
+  val logger: Logger = LoggerFactory.getLogger(getClass.getName)
+  val utils = Utils.getccarUtils()
+  val prop = utils.getProperties
+
+  def apply(sc: SparkContext, sqlContext: SQLContext, prop: Properties, niiConfig: NIIConfig): DataFrame = {
+    val map: Map[String, List[NIIRegression]] = null
+
+    logger.info("1.3 retrieve and prepare product PRICER rates ")
+    val pricer_RDD = utils.load_data(sc, prop.getProperty("NII_PRICER_RATES_INPUT"))
+    val pricerSchema = utils.createStructSchema(CCARConstants.NII_PRICER_SHEMA)
+    var pricer_DF = utils.create_df_pricer(sqlContext, pricer_RDD, pricerSchema, niiConfig)
+    val pmap = utils.getPricerMap()
+    val bpmap = sc.broadcast(pmap)
+    pricer_DF.printSchema()
+    pricer_DF = sqlContext.createDataFrame(pricer_DF.map { p => {
+      val pmap = bpmap.value
+       Row(p(0),pmap.get(p(1).toString()), p(2), p(3))
+      
+    } },pricer_DF.schema)
+    pricer_DF = pricer_DF.filter(pricer_DF("product").notEqual("null"))
+    
+    // converting product rows to column
+     var rows2 = Seq[Row]()
+     val dateLIst = pricer_DF.map { x => x.getString(0) }.distinct().collect()
+     for(d <- dateLIst){
+       val rows = pricer_DF.filter(pricer_DF("date").equalTo(d)).collect()
+       var cols = Seq[Any]()
+       cols = cols :+ d
+       
+       for(row <- rows){
+         cols = cols :+ row.getDouble(3)
+        
+       }
+       if(cols.length == 8)
+        rows2 =( rows2 :+ Row.fromSeq(cols))
+        
+     }
+      val npricerSchema = utils.createStructSchema(CCARConstants.NII_NPRICER_SHEMA)
+     pricer_DF = sqlContext.createDataFrame(sc.parallelize(rows2, 5),npricerSchema )
+   
+     //pricer_DF.rdd.repartition(1).map { x => x.mkString(",")}.saveAsTextFile("niiOutput/priceout2")
+     println("pricer_DF data")
+     pricer_DF.show(28)
+     
+     return pricer_DF
+  }
+}=======
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:util="http://www.springframework.org/schema/util"
+	xsi:schemaLocation="
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-3.0.xsd
+http://www.springframework.org/schema/util http://www.springframework.org/schema/util/spring-util-3.0.xsd">
+
+	<bean id="sparkContext" class="org.apache.spark.SparkContext">
+		<constructor-arg ref="sparkConf" />
+	</bean>
+
+	<util:properties id="config" location="classpath:config/config-${CONFIG_MODE:LOCAL}.properties" />
+	<bean id="sparkConf" class="org.apache.spark.SparkConf">
+		<property name="appName" value="Fcg_Mtg_procedure"></property>
+		<property name="master" value="local[4]"></property>
+
+		<!-- <property name="locations"> <list> <value>classpath:config-${CONFIG_MODE}.properties</value> 
+			</list> </property> -->
+	</bean>
+</beans>
+======
+
+package com.ms.banking.pbg_analytics_spark.nii.process
+
+import org.apache.commons.math.analysis.polynomials.PolynomialSplineFunction
+import org.apache.spark.sql.DataFrame
+import java.util.HashMap
+import org.apache.commons.math.analysis.interpolation.SplineInterpolator
+import java.text.SimpleDateFormat
+import java.util.Date
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility.Utils
+import java.util.Arrays
+import org.slf4j.LoggerFactory
+import org.slf4j.Logger
+
+/**
+ * class to interpolate quarterly rates into daily using SplineInterpolator (with use cubic spline (natural) function for interpolation)
+ * @author venreddy
+ */
+class NIIRatesInterpolation extends Serializable {
+  val logger: Logger = LoggerFactory.getLogger(getClass.getName)
+  val sdf2 = new SimpleDateFormat("yyyy-MM-dd")
+  val sdf3 = new SimpleDateFormat("MM/dd/yyyy")
+  val SAS_INTERPOLATION_START = sdf2.parse("1960-01-01");
+  val ADAY = 1000 * 60 * 60 * 24 * 1.0
+  val cols = Array("lib1m", "sw2", "sw5", "sw10", "sw30")
+  val utils = Utils.getccarUtils()
+
+  def colFunctionMap(scenorio: String, df: DataFrame): HashMap[String, PolynomialSplineFunction] = {
+    logger.info("Calculating Polynomial for each column")
+    val map = new HashMap[String, PolynomialSplineFunction]
+    val date_days = getDaysArray(scenorio, df)
+    val df2 = df.filter(df.col("scenario").equalTo(scenorio))
+    for (col <- cols) {
+      map.put(col, generateSplineFunctions(scenorio, date_days, df2.select(col).map { x => x.getDouble(0) }.collect()))
+    }
+    map
+  }
+
+  def getDaysArray(scenorio: String, df: DataFrame): Array[Double] = {
+    logger.info("Getting the dates Sequence for field data_as_of ")
+    val dateString = df.filter(df.col("scenario").equalTo(scenorio)).select("data_as_of").map { x => x.getString(0) }.collect()
+    convertDateToDouble(dateString)
+  }
+
+  def generateSplineFunctions(scenorio: String, dateValue: Array[Double], rateValue: Array[Double]): PolynomialSplineFunction = {
+    logger.info("Creating Polynomial function for Days and RateValues")
+    val nmap = new HashMap[Double, Double]
+    for (i <- 0 to dateValue.length - 1) {
+      //println(scenorio + " : "+utils.getDateFromDays(utils.getStartDate(), dateValue(i)) + " : " + rateValue(i))
+      nmap.put(dateValue(i), rateValue(i))
+    }
+
+    logger.info("Sorting Days and Rates")
+    Arrays.sort(dateValue)
+    val rateValue2 = new Array[Double](rateValue.length)
+    for (i <- 0 to dateValue.length - 1) {
+      rateValue2(i) = nmap.get(dateValue(i))
+    }
+
+    logger.info("Creating Spiline function")
+    val functions = new SplineInterpolator().interpolate(dateValue, rateValue2);
+    return functions
+  }
+
+  /**
+   * Converting Date to Double
+   * @param dateString
+   * @return
+   */
+  def convertDateToDouble(dateString: Array[String]): Array[Double] = {
+    val res = new Array[Double](dateString.length)
+    for (i <- 0 to (dateString.length - 1)) {
+      val sd = sdf2.parse(dateString(i))
+      res(i) = getDays(sd)
+    }
+    return res
+  }
+
+  def getDays(sd: Date): Double = {
+    logger.info("Getting Days for Date")
+    return Math.round(((sd.getTime() - SAS_INTERPOLATION_START.getTime()) / ADAY))
+
+  }
+}
+================
+package com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility
+
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Properties
+import scala.collection.mutable.ArrayBuffer
+import java.util.Calendar
+import org.apache.hadoop.mapred.InvalidInputException
+import org.apache.spark.SparkContext
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.types.DateType
+import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.types.LongType
+import org.apache.spark.sql.types.StringType
+import org.apache.spark.sql.types.StructField
+import org.apache.spark.sql.types.StructType
+import org.joda.time.LocalDate
+import org.springframework.context.support.ClassPathXmlApplicationContext
+
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIConfig
+import com.ms.banking.pricing.common.utils.TimeUtils.getMonth
+import com.ms.banking.pricing.common.utils.TimeUtils.getQuarter
+import com.ms.banking.pricing.common.utils.TimeUtils.getYear
+import com.ms.banking.pricing.common.utils.format.DFormatter
+
+/**
+ * NII PROCESS
+ *
+ * @author venreddy
+ */
+class NIIUtils extends CCARUtils {
+
+  // NII HISTORICAL RATES SCHEMA
+  def create_df_hist(sqlContext: SQLContext, datardd: RDD[String], NII_INPUT_SCHEMA: StructType, niiConfig: NIIConfig): DataFrame = {
+    var historical_RDD = convertRDD2Row8_hist(datardd, niiConfig)
+    val historical_DF = sqlContext.createDataFrame(historical_RDD, NII_INPUT_SCHEMA)
+    return historical_DF
+  }
+  def convertRDD2Row8_hist(nii_Input_RDD: RDD[String], niiConfig: NIIConfig): RDD[Row] = {
+    println("inside convertRDD2Row8_model:" + nii_Input_RDD.count())
+    val s = nii_Input_RDD.map(x => x.split(",", -1))
+    val armFwdRisk1_RDD = nii_Input_RDD.map(x => x.split(",")).flatMap(p => {
+      val f = true //sdf3.parse(p(0)).after(getDataDate(niiConfig.dtStart, 191)) && sdf3.parse(p(0)).before(niiConfig.dtStart)
+      // val scenArr =  Array("sev","adv","base") 
+      val scenArr = Array("bhc_adv", "frb_adv", "base")
+      var list1 = Seq[Row]()
+      if (f) {
+        println("historical date:" + p(0))
+        for (s <- scenArr)
+          list1 = list1 :+ Row(p(0), s, "hist", 0.00, getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)))
+      }
+      list1
+    })
+    //armFwdRisk1_RDD.repartition(1).map { x => x.mkString(",") }.saveAsTextFile("niiOutput/histrdd")
+    return armFwdRisk1_RDD
+  }
+
+  // NII MODEL RATES ....
+  def create_df_model(sqlContext: SQLContext, datardd: RDD[String], NII_INPUT_SCHEMA: StructType, niiConfig: NIIConfig): DataFrame = {
+    var armFwdRisk1_RDD1 = convertRDD2Row8_model(datardd, niiConfig)
+    val armFwdRisk1_DataFrame = sqlContext.createDataFrame(armFwdRisk1_RDD1, NII_INPUT_SCHEMA)
+    return armFwdRisk1_DataFrame;
+  }
+  def convertRDD2Row8_model(nii_Input_RDD: RDD[String], niiConfig: NIIConfig): RDD[Row] = {
+    val s = nii_Input_RDD.map(x => x.split(",", -1))
+    val armFwdRisk1_RDD = nii_Input_RDD.map(x => x.split(",")).flatMap(p => {
+      val f = sdf3.parse(p(0)).after(getDataDate(niiConfig.dtStart, 191)) && sdf3.parse(p(0)).before(niiConfig.dtStart)
+      var list1 = Seq[Row]()
+      if (f) {
+        list1 = list1 :+ Row(p(0), "hist", null, getDouble(p(8)), getDouble(p(9)), getDouble(p(10)), getDouble(p(11)))
+      }
+      list1
+    })
+    return armFwdRisk1_RDD
+  }
+
+  // LIB1M 
+  def create_df_lib1m(sqlContext: SQLContext, datardd: RDD[String], NII_LIB1M_SCHEMA: StructType, niiConfig: NIIConfig): DataFrame = {
+    var armFwdRisk1_RDD1 = convertRDD2Row8_lib1m(datardd, niiConfig)
+    val armFwdRisk1_DataFrame = sqlContext.createDataFrame(armFwdRisk1_RDD1, NII_LIB1M_SCHEMA)
+    return armFwdRisk1_DataFrame;
+  }
+  def convertRDD2Row8_lib1m(nii_Input_RDD: RDD[String], niiConfig: NIIConfig): RDD[Row] = {
+    val s = nii_Input_RDD.map(x => x.split(",", -1))
+    val armFwdRisk1_RDD = nii_Input_RDD.map(x => x.split(",")).map(p => {
+      Row(p(0), getDouble(p(1)))
+    })
+    return armFwdRisk1_RDD
+  }
+
+  //NII PROJECTED RATES Schema ...
+  def create_df_proj(sqlContext: SQLContext, datardd: RDD[String], NII_PROJECTED_SCHEMA: StructType): DataFrame = {
+    var projectedRDD = convertRDD2Row_proj(datardd)
+    val projected_DF = sqlContext.createDataFrame(projectedRDD, NII_PROJECTED_SCHEMA)
+    return projected_DF;
+  }
+
+  def convertRDD2Row_proj(nii_Input_RDD: RDD[String]): RDD[Row] = {
+    val projectedRDD = nii_Input_RDD.flatMap(_.split("\n")).map(x => x.split(",")).map(p => Row(p(1), p(0), "proj", getDouble(p(2)), getDouble(p(3)), getDouble(p(4)), getDouble(p(5)), getDouble(p(6))))
+    return projectedRDD
+  }
+
+  // NII LOAN PRODUCT SHARES SCHEMA
+  def create_df_loan(sqlContext: SQLContext, datardd: RDD[String], NII_LOAN_SCHEMA: StructType, niiConfig: NIIConfig): DataFrame = {
+    var loan_RDD1 = convertRDD2Row8_loan(datardd, niiConfig)
+    val loan_DataFrame = sqlContext.createDataFrame(loan_RDD1, NII_LOAN_SCHEMA)
+    return loan_DataFrame;
+  }
+
+  def convertRDD2Row8_loan(nii_Input_RDD: RDD[String], niiConfig: NIIConfig): RDD[Row] = {
+    val s = nii_Input_RDD.map(x => x.split(",", -1))
+    val loan1_RDD = nii_Input_RDD.map(x => x.split(",")).map(p => {
+      Row(p(0), getDouble(p(1)), getDouble(p(2)), getDouble(p(3)), getDouble(p(4)), getDouble(p(5)), getDouble(p(6)), getDouble(p(7)))
+    })
+    return loan1_RDD
+  }
+
+  // NII LOAN PRODUCT SHARES SCHEMA
+  def create_df_pricer(sqlContext: SQLContext, datardd: RDD[String], NII_LOAN_SCHEMA: StructType, niiConfig: NIIConfig): DataFrame = {
+    var pricer_RDD1 = convertRDD2Row8_pricer(datardd, niiConfig)
+    val pricer_DataFrame = sqlContext.createDataFrame(pricer_RDD1, NII_LOAN_SCHEMA)
+    return pricer_DataFrame;
+  }
+  def convertRDD2Row8_pricer(nii_Input_RDD: RDD[String], niiConfig: NIIConfig): RDD[Row] = {
+    val s = nii_Input_RDD.map(x => x.split(",", -1))
+    val pricer1_RDD = nii_Input_RDD.map(x => x.split(",")).map(p => {
+      Row(p(0), p(1), getDouble(p(2)), getDouble(p(3)))
+    })
+    return pricer1_RDD
+  }
+
+  def getNiiConfig(): NIIConfig = {
+    val props = new Properties
+    props.load(getClass.getResourceAsStream("/config/nii_config.property"))
+    val df_yyyyMMdd = new DFormatter("yyyyMMdd");
+    val df_yyyyMMdd_ccar = new DFormatter("yyyy-MM-dd");
+    val niiConfig = new NIIConfig;
+    niiConfig.outputFolderPrefix = props.getProperty("outputFolderPrefix")
+    niiConfig.dtScenarioRate = df_yyyyMMdd_ccar.parse(props.getProperty("dt_scenario_rate"))
+    niiConfig.dtScenarioData = df_yyyyMMdd_ccar.parse(props.getProperty("dt_scenario_data"))
+    niiConfig.dtStart = df_yyyyMMdd_ccar.parse(props.getProperty("dt_start"))
+    niiConfig.dtEnd = df_yyyyMMdd_ccar.parse(props.getProperty("dt_end"))
+    niiConfig.dtStart = df_yyyyMMdd_ccar.parse(props.getProperty("reg_dt_start"))
+    niiConfig.regDtEnd = df_yyyyMMdd_ccar.parse(props.getProperty("reg_dt_end"))
+    niiConfig.niiInputFolder = "//v/region/na/appl/banking/pbg_risk_analytics/data/dev/nii/nii_input/"
+    niiConfig.niiOutputFolder = "//v/region/na/appl/banking/pbg_risk_analytics/data/dev/nii/nii_output/"
+    return niiConfig;
+  }
+
+  def getDataDate(dtStart: Date, days: Int): Date = {
+    val localDate = new LocalDate(dtStart).minusDays(days);
+    return localDate.toDate();
+  }
+
+  def minMax(a: Array[Double]): (Double, Double) = {
+    if (a.isEmpty) throw new java.lang.UnsupportedOperationException("array is empty")
+    a.foldLeft((a(0), a(0))) { case ((min, max), e) => (math.min(min, e), math.max(max, e)) }
+  }
+
+  def getStartDate(): Calendar = {
+    val cal = Calendar.getInstance
+    cal.setTime(SAS_INTERPOLATION_START)
+    return cal
+  }
+
+  def getDateFromDays(days: Double): String = {
+    val cal = getStartDate
+    cal.add(Calendar.DATE, Math.round(days).toInt)
+    return sdf3.format(cal.getTime)
+  }
+
+  def getPricerMap(): Map[String, String] = {
+    val map = Map("15y Fixed" -> "Fx_15y", "30y Fixed" -> "Fx_30y", "1mo_IO" -> "Ft_01m", "3/1_IO" -> "Ft_03y", "5/1_IO" -> "Ft_05y", "7/1_IO" -> "Ft_07y", "10/1_IO" -> "Ft_10y")
+    map
+
+  }
+  
+}
+===========
