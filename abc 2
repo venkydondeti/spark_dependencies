@@ -1,0 +1,271 @@
+package com.ms.banking.pbg_analytics_spark.nii.model
+
+import java.util.ArrayList
+
+/**
+ * @author venreddy
+ */
+class MovAvgArrayList(size: Int) extends Serializable{
+
+  var sum: Double = 0.0d
+  var elements: ArrayList[Double] = new ArrayList[Double](size)
+  var validNumber: Int = 0
+
+  def addValue(element: Double): Unit = {
+    if (size <= elements.size()) {
+      var removed = elements.remove(0);
+      if(! (removed.equals(null)) ){
+        validNumber -= 1;
+        sum -= removed;
+      }
+      add(element);
+    } else {
+      add(element);
+    }
+  }
+
+  /**
+   * @param element
+   */
+  def add(element: Double): Unit = {
+    elements.add(element);
+   if(! (element.equals(null)) ){
+      sum += element;
+      validNumber += 1
+    }
+  }
+
+  def getMean(): Double = {
+    if (validNumber > 0) {
+      return sum / validNumber;
+    } else {
+      return Double.NaN;
+    }
+  }
+}
+===============
+package com.ms.banking.pbg_analytics_spark.nii.process
+
+import java.util.Properties
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.constants.CCARConstants
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility.Utils
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIConfig
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIRegression
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import java.util.HashMap
+import org.apache.commons.math.analysis.polynomials.PolynomialSplineFunction
+import java.util.Calendar
+import java.text.SimpleDateFormat
+
+/**
+ *
+ * @author venreddy
+ */
+
+class NIIStratsProjRatesRetriever extends Serializable {
+  val logger: Logger = LoggerFactory.getLogger(getClass.getName)
+  val utils = Utils.getccarUtils()
+  val prop = utils.getProperties
+  val sdf2 = new SimpleDateFormat("yyyy-MM-dd")
+
+  val scenorios = Array("frb_adv", "frb_sa", "frb_base")
+  val cols = Array("lib1m", "sw2", "sw5", "sw10", "sw30")
+
+  /**
+   * @param sc
+   * @param sqlContext
+   * @param prop
+   * @param niiConfig
+   * @return
+   */
+  def apply(sc: SparkContext, sqlContext: SQLContext, prop: Properties, niiConfig: NIIConfig): DataFrame = {
+    val map: Map[String, List[NIIRegression]] = null
+
+    logger.info("1.1.2 projected strat rate ")
+    val projectedRDD = utils.load_data(sc, prop.getProperty("NII_PROJECTED_INPUT"))
+    val projectedSchema = utils.createStructSchema(CCARConstants.NII_PROJ_SCHEMA)
+    val projected_DF = utils.create_df_proj(sqlContext, projectedRDD, projectedSchema)
+
+    val niiRatesInterpolation = new NIIRatesInterpolation
+    val days = niiRatesInterpolation.getDaysArray(scenorios(0), projected_DF) //Total 1095 days
+
+    logger.info("Get MIN, MAX values of dates")
+    val minMax = utils.minMax(days)
+    val polynomialMap = new HashMap[String, HashMap[String, PolynomialSplineFunction]]
+    for (scen <- scenorios) {
+      polynomialMap.put(scen, niiRatesInterpolation.colFunctionMap(scen, projected_DF))
+    }
+
+    logger.info("Generate Daily Rates")
+    var list = Seq[Row]()
+    for (scen <- scenorios) {
+      for (d <- minMax._1.toInt to minMax._2.toInt) {
+        val polFnMap = polynomialMap.get(scen)
+        val date2 = utils.getDateFromDays(d)
+        list = list :+ Row(date2, scen, "proj", polFnMap.get(cols(0)).value(d),
+          polFnMap.get(cols(1)).value(d),
+          polFnMap.get(cols(2)).value(d),
+          polFnMap.get(cols(3)).value(d),
+          polFnMap.get(cols(4)).value(d))
+      }
+    }
+
+    logger.info("creating DF from Sequence")
+    val nRDD = sc.parallelize(list, 2)
+    val interpolateDF = sqlContext.createDataFrame(nRDD, projected_DF.schema)
+
+    interpolateDF.printSchema()
+    println("interpolateDF schema")
+    return interpolateDF
+    
+  }
+}
+====
+package com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility
+
+/**
+ * @author venreddy
+ */
+object Utils {
+  var utils: NIIUtils = null
+  def getccarUtils():NIIUtils={
+    if(utils == null){
+      utils= new NIIUtils
+    }
+    return utils
+  }
+}
+===============
+package com.ms.banking.pbg_analytics_spark.nii.process
+
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility.Utils
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIConfig
+import com.ms.banking.pbg_analytics_spark.nii.model.NIIRegression
+
+/**
+ * CCAR NII process entry point
+ *
+ * @author venreddy
+ */
+
+object CCARNIIProcess {
+
+  val logger: Logger = LoggerFactory.getLogger(getClass.getName)
+  val utils = Utils.getccarUtils()
+
+  def main(args: Array[String]) {
+    val startTimeMillis = System.currentTimeMillis()
+    val prop = utils.getProperties
+    var niiConfig = utils.getNiiConfig()
+    val sc = retrieve(niiConfig, args)
+    logger.info("Stopping spark context")
+    sc.stop()
+  
+    logger.info("To print time duration in seconds:")
+    val endTimeMillis = System.currentTimeMillis()
+    val durationSeconds = (endTimeMillis - startTimeMillis) / 1000
+    println("Total Time took for execution in seconds: " + durationSeconds + " seconds") 
+  }
+
+  def retrieve(niiConfig: NIIConfig, args: Array[String]): SparkContext = {
+    logger.info("Retriving data from 1.1.1 and 1.1.2 and 1.1.3 ")
+    val niiRegressionInputRetriever = new NIIRegressionInputRetriever()
+    val niiRegression1 = niiRegressionInputRetriever.apply(niiConfig)
+
+    val niiRegressionInput = niiRegression1._1
+    // val niiHistInputs = niiRegressionInput.get("hist");
+    //val niiProjInputs = niiRegressionInput.get("proj");
+
+    logger.info("Save Step-1.1.4 result into HDFS")
+   // niiRegressionInput.rdd.repartition(1).map { x => x.mkString(",")}.saveAsTextFile(args(0))
+    
+    return niiRegression1._2
+
+  }
+}
+====
+package com.ms.banking.pbg_analytics_spark.ccar_mortgage.job
+
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import java.text.SimpleDateFormat
+import org.apache.spark.rdd.RDD
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.sql.Row
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.constants.CCARConstants
+import com.ms.banking.pbg_analytics_spark.ccar_mortgage.job.utility.Utils
+import scala.collection.mutable.ArrayBuffer
+
+/**
+ * @author venreddy
+ */
+class MTGProcess2 extends Serializable {
+  val logger: Logger = LoggerFactory.getLogger(getClass.getName)
+   val utils = Utils.getccarUtils()
+  def process_mtg(ArmFwdRisk_DataFrame2: DataFrame, sc: SparkContext, sqlContext: SQLContext): DataFrame = {
+   
+    val fake_rec_df1 = ArmFwdRisk_DataFrame2.filter(ArmFwdRisk_DataFrame2.col("cusip").===("FAKE"))
+    fake_rec_df1.registerTempTable("fake_rec_df")
+    val fake_rec_df2 = sqlContext.sql("select * from fake_rec_df order by scenario desc ,prod_dsc desc, nv desc")
+    val fake_rec_df = utils.dfZipWithIndex(fake_rec_df1, 0, "id", false)
+    val non_fake_rec_df = ArmFwdRisk_DataFrame2.filter(ArmFwdRisk_DataFrame2.col("cusip").!==("FAKE"))
+    logger.info("Total Records in non_fake_rec_df :1248 ")
+
+    logger.info("Generating future quaters")
+    val sdf = new SimpleDateFormat("yyyyMMdd")
+    val qdate = utils.getFutureQuarters(sdf.parse("20151231"), sdf.parse("20190331"), true)
+    val qDateStringList = utils.dateListAsString(qdate)
+    val qDateStringListBrod: Broadcast[ArrayBuffer[String]] = sc.broadcast(qDateStringList)
+    val newfake_rec_rdd: RDD[Row] = geneateQarters(fake_rec_df, qDateStringListBrod)
+    val newfake_rec_df_1 = sqlContext.createDataFrame(newfake_rec_rdd, non_fake_rec_df.schema)
+    val newfake_rec_df = newfake_rec_df_1.orderBy(newfake_rec_df_1.col("portfolioDate"))
+    logger.info("Total Records in non_fake_rec_df : 2160 ")
+
+    newfake_rec_df.registerTempTable("NEW FAKE_REC_TABLE")
+    logger.info("Combining new generated Fake records with Non-fake records")
+    var sytetic_step1_df = newfake_rec_df.unionAll(non_fake_rec_df)
+    sytetic_step1_df.registerTempTable("rec_def")
+    sytetic_step1_df = sqlContext.sql(CCARConstants.RE_ARRANGE)
+    logger.info("Total Records in non_fake_rec_df : 3120 ")
+
+    //   sytetic_step1_df.rdd.repartition(1).map { x => x.mkString(",").replaceAll("null", "") }.saveAsTextFile("ScalaCsv/out105")
+    
+    sytetic_step1_df
+  }
+
+  def geneateQarters(fake_rec_df: DataFrame, qDateStringListBrod: Broadcast[ArrayBuffer[String]]): RDD[Row] = {
+    logger.info("generating Quters ")
+    val newfake_rec_rdd: RDD[Row] = fake_rec_df.flatMap { row =>
+      {
+        var list1 = Seq[Row]()
+        var querters = qDateStringListBrod.value
+        val id = row.getLong(15)
+        // querters = querters.slice(querters.indexOf(v1), querters.size - 1)
+        // val pid = id / querters.size
+        val vid = id % querters.size
+        List.range(0, querters.size - 1).foreach { i =>
+          //      if (i + id.toInt <= querters.size - 1) 
+          if (i + id.toInt <= querters.size - 1 && !querters(i).endsWith("20151231") && !querters(i + id.toInt).endsWith("20151231")) {
+            list1 = list1 :+ utils.createRow(row, querters(i), querters(i + id.toInt))
+          }
+        }
+
+        list1
+
+      }
+    }
+    newfake_rec_rdd
+  }
+}
